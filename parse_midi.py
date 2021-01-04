@@ -148,6 +148,62 @@ def patch_lookup(patch_number):
     return patches.get(patch_number + 1, "Unknown Patch")
 
 
+def key_lookup(key, mode):
+    if mode != 0 & mode != 1:
+        raise ValueError('Invalid mode')
+
+    keys = {
+        -7: ["Cb Major", "Ab Minor"],
+        -6: ["Gb Major", "Eb Minor"],
+        -5: ["Db Major", "Bb Minor"],
+        -4: ["Ab Major", "F Minor"],
+        -3: ["Eb Major", "C Minor"],
+        -2: ["Bb Major", "G Minor"],
+        -1: ["F Major", "D Minor"],
+        0: ["C Major", "A Minor"],
+        1: ["G Major", "E Minor"],
+        2: ["D Major", "B Minor"],
+        3: ["A Major", "F# Minor"],
+        4: ["E Major", "C# Minor"],
+        5: ["B Major", "G# Minor"],
+        6: ["F# Major", "D# Minor"],
+        7: ["C# Major", "A# Minor"],
+    }
+
+    return keys.get(key, ["Unknown", "Unknown"])[mode]
+
+
+class Track:
+    def __init__(self, events):
+        self.events = events
+
+    def __str__(self):
+        track_print_data = [['Delta Time', 'MIDI Message', 'Event Type', 'Description of Event']]
+        string_output = ""
+        for event in self.events:
+            event_string = str(event)
+            track_print_data.append(event_string.split('\t'))
+
+        col_widths = []
+        for col in range(len(track_print_data[0])):
+            current_column_max = 0
+            for row in range(len(track_print_data)):
+                current_column_max = max(len(track_print_data[row][col]), current_column_max)
+            col_widths.append(current_column_max + 2)
+
+        for i, row in enumerate(track_print_data):
+            output = ""
+            for j, word in enumerate(row):
+                output += "".join(word.ljust(col_widths[j]))
+            string_output += output + "\n"
+            if i == 0:
+                spacer = ""
+                for width in col_widths:
+                    spacer += "=" * width
+                string_output += spacer + "\n"
+        return string_output
+
+
 class TrackEvent:
     def __init__(self, v_time, command, data):
         self.v_time = v_time
@@ -254,11 +310,13 @@ class TrackEvent:
                 self.event_type = 'SMPTE Offset'
                 return
             if meta_type == 0x58:
-                self.event_description = f'{self.data[2]} {self.data[3]} {self.data[4]} {self.data[5]}'  # TODO to parse
+                self.event_description = f'{self.data[2]}/{2 ** self.data[3]} '
+                self.event_description += f'({self.data[4]} ticks per click, '
+                self.event_description += f'{self.data[5]} 32nd-notes per quarter note)'
                 self.event_type = 'Time Signature'
                 return
             if meta_type == 0x59:
-                self.event_description = f'{self.data[2]} {"major" if self.data[3] == 0 else "minor"}'  # TODO parse key
+                self.event_description = f'{key_lookup(self.data[2], self.data[3])}'
                 self.event_type = 'Key Signature'
                 return
             if meta_type == 0x7F:
@@ -406,29 +464,7 @@ with open('Twinkle.mid', 'rb') as f:
     if bool(division & (1 << 15)):
         raise ValueError('SMPTE Time Code not yet supported')
 
-    tracks = [parse_track(midi_file=f, delta=division) for track in range(num_track_chunks)]
+    tracks = [Track(parse_track(midi_file=f, delta=division)) for track in range(num_track_chunks)]
 
     for track in tracks:
-        track_print_data = [['Delta Time', 'MIDI Message', 'Event Type', 'Description of Event']]
-        for event in track:
-            event_string = str(event)
-            track_print_data.append(event_string.split('\t'))
-
-        col_widths = []
-        for col in range(len(track_print_data[0])):
-            current_column_max = 0
-            for row in range(len(track_print_data)):
-                current_column_max = max(len(track_print_data[row][col]), current_column_max)
-            col_widths.append(current_column_max + 2)
-
-        for i, row in enumerate(track_print_data):
-            output = ""
-            for j, word in enumerate(row):
-                output += "".join(word.ljust(col_widths[j]))
-            print(output)
-            if i == 0:
-                spacer = ""
-                for width in col_widths:
-                    spacer += "=" * width
-                print(spacer)
-        print('\n')
+        print(track)
