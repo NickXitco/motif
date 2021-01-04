@@ -150,7 +150,7 @@ def patch_lookup(patch_number):
 
 
 def key_lookup(key, mode):
-    if mode != 0 & mode != 1:
+    if mode != 0 and mode != 1:
         raise ValueError('Invalid mode')
 
     keys = {
@@ -242,7 +242,7 @@ class TrackEvent:
         # Key Data (May not be used)
         key = get_note_name(self.data[0])
         perc = chn_nib == 0x9
-        octave = int(self.data[0] / 12) - 2
+        octave = int(self.data[0] / 12) - 1
 
         if cmd_nib == 0x8:
             self.event_description = f'{key}{octave}: {self.data[1]}'
@@ -491,11 +491,145 @@ def create_song():
         print(new_song)
 
 
+def get_perc_sound(key):
+    perc_lookup = {
+        35: "Acoustic Bass Drum",
+        36: "Bass Drum 1",
+        37: "Side Stick",
+        38: "Acoustic Snare",
+        39: "Hand Clap",
+        40: "Electric Snare",
+        41: "Low Floor Tom",
+        42: "Closed High Hat",
+        43: "High Floor Tom",
+        44: "Pedal High Hat",
+        45: "Low Tom",
+        46: "Open High Hat",
+        47: "Low Mid Tom",
+        48: "High Mid Tom",
+        49: "Crash Cymbal 1",
+        50: "High Tom",
+        51: "Ride Cymbal 1",
+        52: "Chinese Cymbal",
+        53: "Ride Bell",
+        54: "Tambourine",
+        55: "Splash Cymbal",
+        56: "Cowbell",
+        57: "Crash Cymbal 2",
+        58: "Vibraslap",
+        59: "Ride Cymbal 2",
+        60: "High Bongo",
+        61: "Low Bongo",
+        62: "Mute High Conga",
+        63: "Open High Conga",
+        64: "Low Conga",
+        65: "High Timbale",
+        66: "Low Timbale",
+        67: "High Agogo",
+        68: "Low Agogo",
+        69: "Cabasa",
+        70: "Maracas",
+        71: "Short Whistle",
+        72: "Long Whistle",
+        73: "Short Guiro",
+        74: "Long Guiro",
+        75: "Claves",
+        76: "High Wood Block",
+        77: "Low Wood Block",
+        78: "Mute Cuica",
+        79: "Open Cuica",
+        80: "Mute Triangle",
+        81: "Open Triangle",
+    }
+
+    return perc_lookup.get(key, "Unknown Percussion")
+
+
+class Note:
+    def __init__(self, start_tick, channel, key, vel):
+        self.start_tick = start_tick
+        self.end_tick = start_tick
+        self.channel = channel
+        self.perc = channel == 0x9
+        self.key = key
+        self.velocity = vel
+        self.perc_sound = get_perc_sound(key) if self.perc else ""
+        self.note_name = f'{get_note_name(key)}{int(key / 12) - 1}'
+
+
+def parse_chord(actual_notes):
+    # Weight each note based on its presence (length)
+    weight_sum = sum(note.end_tick - note.start_tick for note in actual_notes)
+    VELOCITY_MOD = 0.25  # How much should velocity affect the weight of a note?
+    weighted_notes = sorted([
+        {
+            'note': note,
+            'weight': ((note.end_tick - note.start_tick) / weight_sum) * (VELOCITY_MOD * note.velocity)
+        } for note in actual_notes
+    ], key=lambda n: n['weight'], reverse=True)
+    output = ""
+    return output
+
+
 class Song:
     def __init__(self, tracks, division):
         self.tracks = tracks
         self.division = division
         self.event_stream = self.make_event_stream()
+        self.notes = self.parse_notes()
+        self.channels = self.get_channels()
+        self.length = self.get_length()
+
+    def parse_notes(self):
+        notes = []
+
+        notes_on = []  # TODO could be hashed but I can't be bothered
+
+        ticks = sorted(self.event_stream.keys())
+
+        for tick in ticks:
+            events = self.event_stream[tick]
+            for event in events:
+                channel = event.get_channel()
+                key = event.data[0]
+
+                if event.event_type == "Note On":
+                    vel = event.data[1]
+                    notes_on.append(Note(tick, channel, key, vel))
+
+                if event.event_type == "Note Off":
+                    for note in notes_on:
+                        if note.channel == channel and note.key == key:
+                            note.end_tick = tick
+                            notes.append(note)
+                            notes_on.remove(note)
+
+        return sorted(notes, key=lambda n: n.start_tick)
+
+    def get_channels(self):
+        channels = set()
+        ticks = sorted(self.event_stream.keys())
+
+        for tick in ticks:
+            events = self.event_stream[tick]
+            for event in events:
+                if event.get_nibble() != 0xF:
+                    channels.add(event.get_channel())
+        return list(channels)
+
+    def get_notes_in_range(self, start_tick, end_tick):
+        in_range = []
+        if start_tick > end_tick:
+            return in_range
+
+        for note in self.notes:
+            start = note.start_tick
+            end = note.end_tick
+
+            if end > start_tick and start <= end_tick:
+                in_range.append(note)
+
+        return in_range
 
     def make_event_stream(self):
         event_stream = {}
@@ -509,17 +643,8 @@ class Song:
                 current_tick = tick
         return event_stream
 
-    def get_measure(self, tick):
-        # TODO account for different time signatures
-        return int(tick / (self.division * 4))
-
-    def get_beat(self, tick):
-        # TODO account for different time signatures
-        beat_number = int((tick % (self.division * (4 + 1))) / self.division)
-        beat_fraction = Fraction((tick % (self.division * (4 + 1))) / self.division).limit_denominator() - beat_number
-        return f'{beat_number} {beat_fraction}'
-
-    def __str__(self):
+    def get_event_stream_printout(self):
+        HEADER_DATA = 3
         song_data = [['Tick', 'Measure', 'Beat']]
         for track in self.tracks:
             song_data[0].append(f'Track {track.id}')
@@ -535,17 +660,68 @@ class Song:
             for event in self.event_stream[tick]:
                 event_list = 0
 
-                while events[event_list][event.track_id + 3] != '':
+                while events[event_list][event.track_id + HEADER_DATA] != '':
                     event_list += 1
                     if event_list >= len(events):
                         events.append(['' for i in song_data[0]])
 
-                events[event_list][event.track_id + 3] += f'{event.event_type} {event.event_description}'
+                events[event_list][event.track_id + HEADER_DATA] += f'{event.event_type} {event.event_description}'
 
             for event_list in events:
                 song_data.append(event_list)
 
         return pprint_table(song_data)
+
+    def get_measure(self, tick):
+        # TODO account for different time signatures
+        time_signature_numerator = 4
+        return int(tick / (self.division * time_signature_numerator)) + 1
+
+    def get_beat(self, tick):
+        # TODO account for different time signatures
+        time_signature_numerator = 4
+        beat_number = int((tick % (self.division * time_signature_numerator)) / self.division) + 1
+        beat_fraction = Fraction(
+            (tick % (self.division * time_signature_numerator)) / self.division + 1).limit_denominator() - beat_number
+        return f'{beat_number} {beat_fraction}'
+
+    def __str__(self):
+        song_data = [['Tick', 'Measure', 'Beat', 'Notes', 'Chord']]
+        HEADER_DATA = len(song_data[0])
+        for channel in self.channels:
+            song_data[0].append(f'Channel {channel + 1}')
+
+        current_tick = 0
+        beat_size = self.division  # TODO account for different time signatures
+        while current_tick < (self.length + beat_size):
+            beat = ['' for i in song_data[0]]
+            notes = self.get_notes_in_range(current_tick, current_tick + beat_size - 1)
+            beat[0] = str(int(current_tick))
+            beat[1] = str(self.get_measure(current_tick))
+            beat[2] = str(self.get_beat(current_tick))
+
+            actual_notes = [n for n in sorted(notes, key=lambda x: x.key) if n.channel != 0x9]
+
+            for note in notes:
+                note_name = f'{note.note_name} '
+                channel_index = self.channels.index(note.channel) + HEADER_DATA
+                if note_name not in beat[channel_index]:
+                    beat[channel_index] += note_name
+
+            for note in actual_notes:
+                note_name = f'{note.note_name} '
+                if note_name not in beat[3]:
+                    beat[3] += note_name
+
+            beat[4] = parse_chord(actual_notes)
+            current_tick += beat_size
+            song_data.append(beat)
+
+        return pprint_table(song_data)
+
+    def get_length(self):
+        ticks = sorted(self.event_stream.keys(), reverse=True)
+        return ticks[0]
 
 
 if __name__ == "__main__":
