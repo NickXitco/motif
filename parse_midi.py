@@ -1,5 +1,6 @@
 from enum import Enum
 import binascii
+from fractions import Fraction
 
 
 def get_bytes(file_object, num_bytes):
@@ -173,45 +174,60 @@ def key_lookup(key, mode):
     return keys.get(key, ["Unknown", "Unknown"])[mode]
 
 
+def pprint_table(table_data):
+    string_output = ""
+    col_widths = []
+
+    for col in range(len(table_data[0])):
+        current_column_max = 0
+        for row in range(len(table_data)):
+            current_column_max = max(len(table_data[row][col]), current_column_max)
+        col_widths.append(current_column_max + 2)
+
+    for i, row in enumerate(table_data):
+        output = ""
+        for j, word in enumerate(row):
+            output += "".join(word.ljust(col_widths[j]))
+        string_output += output + "\n"
+
+        if i == 0:
+            spacer = ""
+            for width in col_widths:
+                spacer += "=" * width
+            string_output += spacer + "\n"
+
+    return string_output
+
+
 class Track:
-    def __init__(self, events):
+    def __init__(self, events, track_id):
         self.events = events
+        self.id = track_id
+        self.label_events()
 
     def __str__(self):
         track_print_data = [['Delta Time', 'MIDI Message', 'Event Type', 'Description of Event']]
-        string_output = ""
         for event in self.events:
             event_string = str(event)
             track_print_data.append(event_string.split('\t'))
 
-        col_widths = []
-        for col in range(len(track_print_data[0])):
-            current_column_max = 0
-            for row in range(len(track_print_data)):
-                current_column_max = max(len(track_print_data[row][col]), current_column_max)
-            col_widths.append(current_column_max + 2)
-
-        for i, row in enumerate(track_print_data):
-            output = ""
-            for j, word in enumerate(row):
-                output += "".join(word.ljust(col_widths[j]))
-            string_output += output + "\n"
-            if i == 0:
-                spacer = ""
-                for width in col_widths:
-                    spacer += "=" * width
-                string_output += spacer + "\n"
+        string_output = pprint_table(track_print_data)
         return string_output
+
+    def label_events(self):
+        for event in self.events:
+            event.track_id = self.id
 
 
 class TrackEvent:
-    def __init__(self, v_time, command, data):
-        self.v_time = v_time
+    def __init__(self, tick, command, data):
+        self.tick = tick
         self.command = command
         self.data = data
         self.event_type = ""
         self.event_description = ""
         self.populate_event_data()
+        self.track_id = -1
 
     def get_nibble(self):
         return self.command[0] >> 4
@@ -225,14 +241,15 @@ class TrackEvent:
 
         # Key Data (May not be used)
         key = get_note_name(self.data[0])
-        octave = int(self.data[0] / 12) - 1
+        perc = chn_nib == 0x9
+        octave = int(self.data[0] / 12) - 2
 
         if cmd_nib == 0x8:
             self.event_description = f'{key}{octave}: {self.data[1]}'
             self.event_type = 'Note Off'
             return
         if cmd_nib == 0x9:
-            self.event_description = f'{key}{octave}: {self.data[1]}'
+            self.event_description = f'{key}{octave}{"*" if perc else ""}: {self.data[1]}'
             self.event_type = 'Note Off' if self.data[1] == 0 else 'Note On'
             return
         if cmd_nib == 0xA:
@@ -327,7 +344,7 @@ class TrackEvent:
         return
 
     def __str__(self):
-        output_string = f'{self.v_time}\t'
+        output_string = f'{self.tick}\t'
         output_string += f'{str(binascii.hexlify(self.command), "utf-8")} '
         for byte in [bytes([b]) for b in self.data]:
             output_string += f'{str(binascii.hexlify(byte), "utf-8")} '
@@ -338,8 +355,8 @@ class TrackEvent:
 
 
 def parse_header(midi_file):
-    midi_header = get_bytes(midi_file, 4)
-    if midi_header != 0x4d546864:
+    midi_header = midi_file.read(4)
+    if midi_header != b'MThd':
         raise ValueError('Invalid MIDI Header')
 
     header_length = get_bytes(midi_file, 4)
@@ -439,9 +456,9 @@ def get_track_event(midi_file):
     return v_time_length + event_length, TrackEvent(v_time, command, data)
 
 
-def parse_track(midi_file, delta):
-    track_header = get_bytes(midi_file, 4)
-    if track_header != 0x4d54726b:
+def parse_track(midi_file):
+    track_header = midi_file.read(4)
+    if track_header != b'MTrk':
         raise ValueError('Invalid Track header')
 
     track_length = get_bytes(midi_file, 4)
@@ -454,17 +471,82 @@ def parse_track(midi_file, delta):
     return track_events
 
 
-with open('Twinkle.mid', 'rb') as f:
-    midi_format, num_track_chunks, division = parse_header(midi_file=f)
+def create_song():
+    with open('world-1-birabuto.mid', 'rb') as f:
+        midi_format, num_track_chunks, division = parse_header(midi_file=f)
 
-    if midi_format == Format.MULTI_SONG:
-        raise ValueError('Multi song midi not yet supported')
-    if midi_format > 2:
-        raise ValueError('Invalid midi format')
-    if bool(division & (1 << 15)):
-        raise ValueError('SMPTE Time Code not yet supported')
+        if midi_format == Format.MULTI_SONG:
+            raise ValueError('Multi song midi not yet supported')
+        if midi_format > 2:
+            raise ValueError('Invalid midi format')
+        if bool(division & (1 << 15)):
+            raise ValueError('SMPTE Time Code not yet supported')
 
-    tracks = [Track(parse_track(midi_file=f, delta=division)) for track in range(num_track_chunks)]
+        tracks = [Track(parse_track(midi_file=f), i) for i in range(num_track_chunks)]
 
-    for track in tracks:
-        print(track)
+        # for track in tracks:
+        #     print(track)
+
+        new_song = Song(tracks, division)
+        print(new_song)
+
+
+class Song:
+    def __init__(self, tracks, division):
+        self.tracks = tracks
+        self.division = division
+        self.event_stream = self.make_event_stream()
+
+    def make_event_stream(self):
+        event_stream = {}
+        for track in self.tracks:
+            current_tick = 0
+            for event in track.events:
+                tick = event.tick + current_tick
+                if tick not in event_stream:
+                    event_stream[tick] = []
+                event_stream[tick].append(event)
+                current_tick = tick
+        return event_stream
+
+    def get_measure(self, tick):
+        # TODO account for different time signatures
+        return int(tick / (self.division * 4))
+
+    def get_beat(self, tick):
+        # TODO account for different time signatures
+        beat_number = int((tick % (self.division * (4 + 1))) / self.division)
+        beat_fraction = Fraction((tick % (self.division * (4 + 1))) / self.division).limit_denominator() - beat_number
+        return f'{beat_number} {beat_fraction}'
+
+    def __str__(self):
+        song_data = [['Tick', 'Measure', 'Beat']]
+        for track in self.tracks:
+            song_data[0].append(f'Track {track.id}')
+
+        ticks = sorted(self.event_stream.keys())
+
+        for tick in ticks:
+            events = [['' for i in song_data[0]]]
+            events[0][0] = str(tick)
+            events[0][1] = str(self.get_measure(tick))
+            events[0][2] = str(self.get_beat(tick))
+
+            for event in self.event_stream[tick]:
+                event_list = 0
+
+                while events[event_list][event.track_id + 3] != '':
+                    event_list += 1
+                    if event_list >= len(events):
+                        events.append(['' for i in song_data[0]])
+
+                events[event_list][event.track_id + 3] += f'{event.event_type} {event.event_description}'
+
+            for event_list in events:
+                song_data.append(event_list)
+
+        return pprint_table(song_data)
+
+
+if __name__ == "__main__":
+    create_song()
