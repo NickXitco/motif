@@ -1,3 +1,4 @@
+import math
 from enum import Enum
 import binascii
 from fractions import Fraction
@@ -240,9 +241,13 @@ class TrackEvent:
         chn_nib = self.get_channel()
 
         # Key Data (May not be used)
-        key = get_note_name(self.data[0])
+        key = 0
+        octave = 0
         perc = chn_nib == 0x9
-        octave = int(self.data[0] / 12) - 1
+
+        if len(self.data) > 0:
+            key = get_note_name(self.data[0])
+            octave = int(self.data[0] / 12) - 1
 
         if cmd_nib == 0x8:
             self.event_description = f'{key}{octave}: {self.data[1]}'
@@ -277,6 +282,7 @@ class TrackEvent:
             if chn_nib == 0x0 or chn_nib == 0x7:
                 self.event_description = self.data[1:].decode().strip()
                 self.event_type = 'System Exclusive Message'
+                return
 
             meta_type = self.data[0]
             try:
@@ -435,15 +441,32 @@ def cleaner_event_parse(midi_file):
             data += bytearray(meta_type) + bytearray(meta_length) + bytearray(meta_data)
             bytes_read += meta_length[0] + 2
         elif chn_nib == 0x0 or chn_nib == 0x7:
-            sysex = midi_file.read(1)
+            sysex_bytes = midi_file.read(1)[0]
             bytes_read += 1
-            while sysex != 0xF7:
-                data += bytearray(sysex)
-                sysex = midi_file.read(1)
-                bytes_read += 1
+            midi_file.read(sysex_bytes)
+            bytes_read += sysex_bytes
         else:
             raise ValueError('Bad command.')
     else:
+        # TODO Implement Running Status
+        #   This is 2AM me talking but I was running into a parsing issue with a midi file downloaded from the internet.
+        #   It took me forever to figure out but I discovered the issue was that of the MIDI "running status", which
+        #   was only briefly mentioned in the original spec I was using to implement this. However it's a big deal
+        #   when it comes to processing MIDI events specifically. Here's how I think it works:
+        #
+        #   Every time we receive an event, we set the running status to be the command byte. However, if the command
+        #   seemingly doesn't exist, we know to use the previous command (or the last command to set the running status)
+        #   as the command for this event, and proceed as if we had read the running status as the command.
+        #
+        #   This works because all valid track event commands are 1 high i.e, greater than 0x80, and every MIDI command
+        #   value is AT MOST 127 or 0x7F, so we can safely chain together identically status-ed MIDI events without
+        #   worry.
+        #
+        #   System/meta events do not use running status and clear it. Do not make the mistake of setting the running
+        #   status to 0xFF, because then if there really is an invalid command, it will be read as a system event which
+        #   could corrupt the file completely. If this is the case, then we have a bad command, and should handle it
+        #   somewhat gracefully.
+
         raise ValueError('Bad command.')  # TODO add byte number
 
     return bytes_read, command, data
@@ -468,11 +491,12 @@ def parse_track(midi_file):
         track_event_length, track_event = get_track_event(midi_file)
         bytes_processed += track_event_length
         track_events.append(track_event)
+        print(track_event)
     return track_events
 
 
 def create_song():
-    with open('world-1-birabuto.mid', 'rb') as f:
+    with open('snowman.mid', 'rb') as f:
         midi_format, num_track_chunks, division = parse_header(midi_file=f)
 
         if midi_format == Format.MULTI_SONG:
@@ -484,11 +508,11 @@ def create_song():
 
         tracks = [Track(parse_track(midi_file=f), i) for i in range(num_track_chunks)]
 
-        # for track in tracks:
-        #     print(track)
+        for track in tracks:
+            print(track)
 
-        new_song = Song(tracks, division)
-        print(new_song)
+        # new_song = Song(tracks, division)
+        # print(new_song)
 
 
 def get_perc_sound(key):
@@ -557,17 +581,62 @@ class Note:
         self.note_name = f'{get_note_name(key)}{int(key / 12) - 1}'
 
 
+def create_chord_vector(combined_octaves):
+    NOTES_IN_OCTAVE = 12
+    chord_vector = [0 for _ in range(NOTES_IN_OCTAVE)]
+    note_lookup = {
+        "C": 0,
+        "C#": 1,
+        "D": 2,
+        "D#": 3,
+        "E": 4,
+        "F": 5,
+        "F#": 6,
+        "G": 7,
+        "G#": 8,
+        "A": 9,
+        "A#": 10,
+        "B": 11
+    }
+
+    for note in combined_octaves:
+        chord_vector[note_lookup.get(note)] = combined_octaves[note]
+
+    return chord_vector
+
+
 def parse_chord(actual_notes):
     # Weight each note based on its presence (length)
     weight_sum = sum(note.end_tick - note.start_tick for note in actual_notes)
+    # TODO these modifiers aren't really good because they can't easily be set to have no effect
     VELOCITY_MOD = 0.25  # How much should velocity affect the weight of a note?
+    ROOT_MOD = 2  # How much should being root note affect the weight of a note?
     weighted_notes = sorted([
         {
             'note': note,
-            'weight': ((note.end_tick - note.start_tick) / weight_sum) * (VELOCITY_MOD * note.velocity)
-        } for note in actual_notes
+            'weight': ((note.end_tick - note.start_tick) / weight_sum) *
+                      (VELOCITY_MOD * note.velocity) *
+                      (ROOT_MOD if i == 0 else 1)
+        } for i, note in enumerate(actual_notes)
     ], key=lambda n: n['weight'], reverse=True)
-    output = ""
+
+    # Merge octaves by combining weights
+    combined_octaves = {}
+    for note in weighted_notes:
+        note_name = get_note_name(note['note'].key)
+        if note_name not in combined_octaves:
+            combined_octaves[note_name] = 0
+        combined_octaves[note_name] += note['weight']
+
+    # Normalize Chord Weights
+    weight_sum = sum(combined_octaves[note] for note in combined_octaves)
+    for note in combined_octaves:
+        combined_octaves[note] /= weight_sum
+
+    chord_vector = create_chord_vector(combined_octaves)
+    closest_chords = match_chord_vector(chord_vector)
+
+    output = ", ".join(chord.name for chord in closest_chords)
     return output
 
 
@@ -644,15 +713,15 @@ class Song:
         return event_stream
 
     def get_event_stream_printout(self):
-        HEADER_DATA = 3
         song_data = [['Tick', 'Measure', 'Beat']]
+        HEADER_DATA = len(song_data[0])
         for track in self.tracks:
             song_data[0].append(f'Track {track.id}')
 
         ticks = sorted(self.event_stream.keys())
 
         for tick in ticks:
-            events = [['' for i in song_data[0]]]
+            events = [['' for _ in song_data[0]]]
             events[0][0] = str(tick)
             events[0][1] = str(self.get_measure(tick))
             events[0][2] = str(self.get_beat(tick))
@@ -663,7 +732,7 @@ class Song:
                 while events[event_list][event.track_id + HEADER_DATA] != '':
                     event_list += 1
                     if event_list >= len(events):
-                        events.append(['' for i in song_data[0]])
+                        events.append(['' for _ in song_data[0]])
 
                 events[event_list][event.track_id + HEADER_DATA] += f'{event.event_type} {event.event_description}'
 
@@ -694,7 +763,7 @@ class Song:
         current_tick = 0
         beat_size = self.division  # TODO account for different time signatures
         while current_tick < (self.length + beat_size):
-            beat = ['' for i in song_data[0]]
+            beat = ['' for _ in song_data[0]]
             notes = self.get_notes_in_range(current_tick, current_tick + beat_size - 1)
             beat[0] = str(int(current_tick))
             beat[1] = str(self.get_measure(current_tick))
@@ -722,6 +791,77 @@ class Song:
     def get_length(self):
         ticks = sorted(self.event_stream.keys(), reverse=True)
         return ticks[0]
+
+
+class Chord:
+    def __init__(self, vector, name):
+        # TODO consider alternate chord names?
+        self.vector = vector + [0] * (12 - len(vector))
+        self.name = name
+
+    def distance(self, other):
+        return math.sqrt(sum((self.vector[i] - other.vector[i]) ** 2 for i in range(12)))
+
+
+def match_chord_vector(chord_vector):
+    # TODO consider key signature?
+    input_chord = Chord(chord_vector, "Unnamed")
+
+    # TODO create generator for this library
+    chord_library = generate_chord_library()
+    # chord_library = [
+    #     Chord([0.4, 0, 0, 0, 0.3, 0, 0, 0.3, 0, 0, 0, 0], "C"),
+    #     Chord([0, 0, 0.4, 0, 0, 0, 0.3, 0, 0, 0.3, 0, 0], "D"),
+    #     Chord([0, 0, 0, 0, 0.4, 0, 0, 0, 0.3, 0, 0, 0.3], "E"),
+    #     Chord([0.6, 0, 0, 0, 0, 0, 0, 0.4, 0, 0, 0, 0], "C5"),
+    # ]
+
+    # Compute distance to each chord in library
+    distances = [[input_chord.distance(chord), chord] for chord in chord_library]
+    distances = sorted(distances, key=lambda chord: chord[0])
+
+    DISTANCE_THRESHOLD = 0.5
+    close_chords = [chord[1] for chord in distances if chord[0] <= DISTANCE_THRESHOLD]
+
+    return close_chords
+
+
+def generate_chord_library():
+    library = []
+
+    # Multiplier for the weight of the root note,
+    # will be semi-normalized so it will become less potent as you add notes to the chord
+    ROOT_MOD = 1.5
+
+    chord_templates = [
+        [[0, 7], "5"],
+        [[0, 4, 7], ""],
+        [[0, 3, 7], "m"],
+        [[0, 4, 8], "+"],
+        [[0, 2, 7], "sus2"],
+        [[0, 5, 7], "sus"],
+        [[0, 4, 7, 9], "6"],
+        [[0, 4, 7, 10], "7"],
+        [[0, 4, 7, 11], "maj7"],
+        [[0, 3, 7, 10], "m7"],
+        [[0, 4, 7, 14], "add9"],
+    ]
+
+    for template in chord_templates:
+        steps = template[0]
+        name = template[1]
+        for i in range(12):
+            new_chord = Chord([], f'{get_note_name(i)}{name}')
+            for step in steps:
+                idx = (i + step) % 12
+                new_chord.vector[idx] = 1 / len(steps)
+                if step == 0:
+                    new_chord.vector[idx] *= ROOT_MOD
+
+            # "Normalize"
+            new_chord.vector = [x / sum(new_chord.vector) for x in new_chord.vector]
+            library.append(new_chord)
+    return library
 
 
 if __name__ == "__main__":
