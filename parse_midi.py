@@ -419,9 +419,16 @@ def get_note_name(key):
         return "B"
 
 
-def cleaner_event_parse(midi_file):
-    bytes_read = 1
-    command = midi_file.read(1)
+running_status = -1  # TODO can we cleanly make this not a global variable? Problem to solve later.
+
+
+def cleaner_event_parse(midi_file, use_running_status):
+    global running_status
+    command = running_status
+    bytes_read = 0
+    if not use_running_status:
+        bytes_read += 1
+        command = midi_file.read(1)
     cmd_nib = command[0] >> 4
     chn_nib = command[0] & 0x0F
 
@@ -429,10 +436,12 @@ def cleaner_event_parse(midi_file):
 
     if cmd_nib == 0x8 or cmd_nib == 0x9 or cmd_nib == 0xA or cmd_nib == 0xA or cmd_nib == 0xB or cmd_nib == 0xE:
         data += bytearray(midi_file.read(2))
+        running_status = command
         bytes_read += 2
     elif cmd_nib == 0xC or cmd_nib == 0xD:
         data += bytearray(midi_file.read(1))
         bytes_read += 1
+        running_status = command
     elif cmd_nib == 0xF:
         if chn_nib == 0xF:
             meta_type = midi_file.read(1)
@@ -446,35 +455,20 @@ def cleaner_event_parse(midi_file):
             midi_file.read(sysex_bytes)
             bytes_read += sysex_bytes
         else:
-            raise ValueError('Bad command.')
+            raise ValueError(f'Bad command at byte {midi_file.tell() - 1}')
     else:
-        # TODO Implement Running Status
-        #   This is 2AM me talking but I was running into a parsing issue with a midi file downloaded from the internet.
-        #   It took me forever to figure out but I discovered the issue was that of the MIDI "running status", which
-        #   was only briefly mentioned in the original spec I was using to implement this. However it's a big deal
-        #   when it comes to processing MIDI events specifically. Here's how I think it works:
-        #
-        #   Every time we receive an event, we set the running status to be the command byte. However, if the command
-        #   seemingly doesn't exist, we know to use the previous command (or the last command to set the running status)
-        #   as the command for this event, and proceed as if we had read the running status as the command.
-        #
-        #   This works because all valid track event commands are 1 high i.e, greater than 0x80, and every MIDI command
-        #   value is AT MOST 127 or 0x7F, so we can safely chain together identically status-ed MIDI events without
-        #   worry.
-        #
-        #   System/meta events do not use running status and clear it. Do not make the mistake of setting the running
-        #   status to 0xFF, because then if there really is an invalid command, it will be read as a system event which
-        #   could corrupt the file completely. If this is the case, then we have a bad command, and should handle it
-        #   somewhat gracefully.
+        if running_status != -1:
+            midi_file.seek(-1, 1)
+            return cleaner_event_parse(midi_file, True)
 
-        raise ValueError('Bad command.')  # TODO add byte number
+        raise ValueError(f'Bad command at byte {midi_file.tell() - 1}')
 
     return bytes_read, command, data
 
 
 def get_track_event(midi_file):
     v_time_length, v_time = get_variable_time(midi_file)
-    event_length, command, data = cleaner_event_parse(midi_file)
+    event_length, command, data = cleaner_event_parse(midi_file, False)
 
     return v_time_length + event_length, TrackEvent(v_time, command, data)
 
@@ -491,12 +485,11 @@ def parse_track(midi_file):
         track_event_length, track_event = get_track_event(midi_file)
         bytes_processed += track_event_length
         track_events.append(track_event)
-        print(track_event)
     return track_events
 
 
 def create_song():
-    with open('snowman.mid', 'rb') as f:
+    with open('olors_Of_The_Wind.mid', 'rb') as f:
         midi_format, num_track_chunks, division = parse_header(midi_file=f)
 
         if midi_format == Format.MULTI_SONG:
@@ -508,11 +501,11 @@ def create_song():
 
         tracks = [Track(parse_track(midi_file=f), i) for i in range(num_track_chunks)]
 
-        for track in tracks:
-            print(track)
+        # for track in tracks:
+        #     print(track)
 
-        # new_song = Song(tracks, division)
-        # print(new_song)
+        new_song = Song(tracks, division)
+        print(new_song)
 
 
 def get_perc_sound(key):
@@ -636,7 +629,7 @@ def parse_chord(actual_notes):
     chord_vector = create_chord_vector(combined_octaves)
     closest_chords = match_chord_vector(chord_vector)
 
-    output = ", ".join(chord.name for chord in closest_chords)
+    output = ", ".join(chord.name for chord in closest_chords[:2])
     return output
 
 
@@ -660,13 +653,14 @@ class Song:
             events = self.event_stream[tick]
             for event in events:
                 channel = event.get_channel()
-                key = event.data[0]
 
                 if event.event_type == "Note On":
+                    key = event.data[0]
                     vel = event.data[1]
                     notes_on.append(Note(tick, channel, key, vel))
 
                 if event.event_type == "Note Off":
+                    key = event.data[0]
                     for note in notes_on:
                         if note.channel == channel and note.key == key:
                             note.end_tick = tick
@@ -807,14 +801,7 @@ def match_chord_vector(chord_vector):
     # TODO consider key signature?
     input_chord = Chord(chord_vector, "Unnamed")
 
-    # TODO create generator for this library
     chord_library = generate_chord_library()
-    # chord_library = [
-    #     Chord([0.4, 0, 0, 0, 0.3, 0, 0, 0.3, 0, 0, 0, 0], "C"),
-    #     Chord([0, 0, 0.4, 0, 0, 0, 0.3, 0, 0, 0.3, 0, 0], "D"),
-    #     Chord([0, 0, 0, 0, 0.4, 0, 0, 0, 0.3, 0, 0, 0.3], "E"),
-    #     Chord([0.6, 0, 0, 0, 0, 0, 0, 0.4, 0, 0, 0, 0], "C5"),
-    # ]
 
     # Compute distance to each chord in library
     distances = [[input_chord.distance(chord), chord] for chord in chord_library]
